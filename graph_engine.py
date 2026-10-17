@@ -316,7 +316,7 @@ def build_procurement_graph(db_path: str = "/tmp/procurement_state.db"):
     workflow.add_edge("dual_extract_quotes_node", "diff_and_questionnaire_node")
     workflow.add_edge("diff_and_questionnaire_node", "reconcile_and_score_node")
     workflow.add_edge("reconcile_and_score_node", "generate_po_node")
-    workflow.add_edge("end", END)
+    workflow.add_edge("generate_po_node", END)  # Corrected from "end" to END
 
     return workflow.compile(
         checkpointer=memory,
