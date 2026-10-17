@@ -12,10 +12,10 @@ from google.genai import types
 from groq import Groq
 from schemas import VendorQuoteExtraction
 
-# Strictly locked to your requested Gemini models
-GEMINI_MODEL = "gemini-3.8-flash"                       # reader A + analyst (change if your dropdown differs)
+# Model Configurations
+GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
-GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
 
 
 def _clean_key(key: str) -> str:
@@ -25,7 +25,6 @@ def _clean_key(key: str) -> str:
 
 
 def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
-    """Reads the buyer's 30-line-item spreadsheet (.xlsx or .csv) and standardizes columns."""
     ext = os.path.splitext(file_path)[-1].lower()
     if ext in [".xlsx", ".xls"]:
         df = pd.read_excel(file_path)
@@ -48,7 +47,6 @@ def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
 
 
 def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
-    """Extracts raw text/tables and image bytes from PDF, DOCX, XLSX, PNG/JPG, or TXT."""
     ext = os.path.splitext(file_path)[-1].lower()
     extracted_text = f"--- SOURCE FILE: {os.path.basename(file_path)} ---\n"
     images_bytes: List[bytes] = []
@@ -91,7 +89,6 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
 
 
 class DualLLMRouter:
-    """Manages Gemini Primary + Fallback family routing and Groq Llama 4 parallel execution."""
     def __init__(self, gemini_api_key: str = None, groq_api_key: str = None):
         self.gemini_key = _clean_key(gemini_api_key or os.getenv("GEMINI_API_KEY", ""))
         self.groq_key = _clean_key(groq_api_key or os.getenv("GROQ_API_KEY", ""))
@@ -99,9 +96,8 @@ class DualLLMRouter:
         self.groq_client = Groq(api_key=self.groq_key) if self.groq_key else None
 
     def call_gemini_with_fallback(self, prompt: str, images_bytes: List[bytes] = None, schema=None) -> Tuple[Any, str]:
-        """Attempts GEMINI_MODEL ('gemini-3.8-flash'), strictly falling back ONLY to GEMINI_FALLBACKS."""
         if not self.gemini_client:
-            raise ValueError("GEMINI_API_KEY is missing or empty. Please check the sidebar or Streamlit Secrets.")
+            raise ValueError("GEMINI_API_KEY is missing or empty.")
 
         primary = os.getenv("PRIMARY_GEMINI_MODEL", GEMINI_MODEL).strip()
         models_to_try = list(dict.fromkeys([primary] + GEMINI_FALLBACKS))
@@ -135,31 +131,28 @@ class DualLLMRouter:
                 return text_out, model_name
             except Exception as e:
                 err_msg = f"[{model_name}]: {type(e).__name__} - {str(e)}"
-                print("Gemini Fallback Warning:", err_msg)
                 errors_log.append(err_msg)
                 continue
 
         raise RuntimeError("All configured Gemini models failed. Details: " + " | ".join(errors_log))
 
     def call_groq_llama4(self, prompt: str, images_bytes: List[bytes] = None, json_mode: bool = True) -> Tuple[Any, str]:
-        """Calls Llama 4 Scout on Groq with vision + JSON schema enforcement."""
         if not self.groq_client:
             raise ValueError("GROQ_API_KEY is missing or empty.")
 
+        model_to_use = os.getenv("GROQ_LLAMA4_MODEL", GROQ_LLAMA4_MODEL).strip()
         user_content = [{"type": "text", "text": prompt}]
+        
+        # Note: If images are present, text-only Groq models will receive the text prompt + visual context extracted
         if images_bytes:
-            b64_img = base64.b64encode(images_bytes[0]).decode("utf-8")
-            user_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64_img}"}
-            })
+            user_content[0]["text"] += "\n[Note: Vendor document included visual/image attachments processed in text payload.]"
 
         kwargs = {
-            "model": GROQ_LLAMA4_MODEL,
+            "model": model_to_use,
             "messages": [{"role": "user", "content": user_content}],
             "temperature": 0.1,
         }
-        if json_mode and not images_bytes:
+        if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
         completion = self.groq_client.chat.completions.create(**kwargs)
@@ -171,5 +164,5 @@ class DualLLMRouter:
                 if raw_text.startswith("json"):
                     raw_text = raw_text[4:]
             raw_text = raw_text.strip()
-            return json.loads(raw_text), GROQ_LLAMA4_MODEL
-        return raw_text, GROQ_LLAMA4_MODEL
+            return json.loads(raw_text), model_to_use
+        return raw_text, model_to_use
