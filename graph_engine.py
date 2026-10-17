@@ -5,7 +5,13 @@ import pandas as pd
 import duckdb
 from typing import Dict, Any, List
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.sqlite import SqliteSaver
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    HAS_SQLITE_SAVER = True
+except ImportError:
+    from langgraph.checkpoint.memory import MemorySaver
+    HAS_SQLITE_SAVER = False
 from schemas import ProcurementState, VendorQuoteExtraction, ClarificationEvaluation
 from tools_and_models import extract_multimodal_payload, DualLLMRouter, scan_for_prompt_injection
 
@@ -557,8 +563,11 @@ def generate_po_node(state: ProcurementState) -> Dict[str, Any]:
 
 
 def build_procurement_graph(db_path: str = "/tmp/procurement_state.db"):
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    memory = SqliteSaver(conn)
+    if HAS_SQLITE_SAVER:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        memory = SqliteSaver(conn)
+    else:
+        memory = MemorySaver()
 
     workflow = StateGraph(ProcurementState)
     workflow.add_node("create_rfx_node", create_rfx_node)
