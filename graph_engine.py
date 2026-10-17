@@ -65,7 +65,7 @@ def create_rfx_node(state: ProcurementState) -> Dict[str, Any]:
 
     prompt = f"""Draft a professional Request for Quotation (RFx) Reference #{state['rfx_id']} dated {state['reference_date']}.
 
-CRITICAL SUBMISSION POLICY (MUST BE HIGHLIGHTED PROMINENTLY):
+CRITICAL SUBMISSION POLICY (MUST BE HIGHLIGHTED SUBTLY):
 - DO NOT include or demand any rigid quotation template or standard spreadsheet format.
 - Explicitly encourage vendors to submit their quotes in **Word (.docx) or PDF (.pdf) documents**, or whatever format is fastest for them (existing rate cards, emails, spreadsheets, or clear photos). Our AI engine parses all formats automatically.
 
