@@ -174,3 +174,58 @@ if st.session_state.stage >= 3 and state_vals.get("comparison_summary"):
     st.dataframe(pd.DataFrame(state_vals["line_level_awards"]), use_container_width=True)
     st.markdown(state_vals.get("final_po_document", ""))
     st.download_button("⬇️ Download Purchase Order (.md)", data=state_vals.get("final_po_document", ""), file_name="Purchase_Order.md")
+
+    # --- DEMO SHOWCASE EXPANDER: Live Agent State & Graph Inspection ---
+with st.sidebar:
+    st.divider()
+    show_inspector = st.checkbox("🛠️ Show Live Agent Inspector", value=False)
+
+if show_inspector:
+    st.divider()
+    st.subheader("🛠️ Live Agent Architecture & State Inspector (Demo Mode)")
+    
+    tab_state, tab_history, tab_graph = st.tabs(["📦 Active State Checkpoint", "📜 Thread History & Fault Tolerance", "🗺️ Agent Graph Workflow"])
+    
+    with tab_state:
+        st.caption("Inspects the exact typed `TypedDict` state stored in the SQLite checkpoint database at `/tmp/procurement_state.db`.")
+        current_snap = st.session_state.graph.get_state(st.session_state.thread_config)
+        if current_snap:
+            st.write("**Next Paused / Target Node:**", current_snap.next)
+            st.write("**Current Checkpoint ID:**", current_snap.config.get("configurable", {}).get("checkpoint_id"))
+            
+            # Show safely filterable key-value summary
+            vals = current_snap.values
+            if vals:
+                st.write("**Stored Data Keys:**", list(vals.keys()))
+                if "buyer_requirements" in vals and vals["buyer_requirements"]:
+                    st.info(f"Loaded {len(vals['buyer_requirements'])} Buyer Line Items in state.")
+                if "vendor_files" in vals and vals["vendor_files"]:
+                    st.info(f"Active Vendor Files in State: {list(vals['vendor_files'].keys())}")
+        else:
+            st.warning("No active state checkpoint found yet. Run an E2E query first.")
+
+    with tab_history:
+        st.caption("Demonstrates fault-tolerance: shows that every node invocation is checkpointed so the system can resume from any failure.")
+        try:
+            history_list = list(st.session_state.graph.get_state_history(st.session_state.thread_config))
+            for idx, h in enumerate(history_list):
+                step_num = h.metadata.get("step", idx)
+                next_node = h.next
+                chk_id = h.config.get("configurable", {}).get("checkpoint_id", "")[:8]
+                st.markdown(f"**Step {step_num}** | Checkpoint: `{chk_id}` | Next Node: `{next_node}`")
+        except Exception as e:
+            st.info("Execute Step 1 & 2 to populate checkpoint history.")
+
+    with tab_graph:
+        st.caption("Visual representation of the LangGraph State Machine powering your procurement pipeline.")
+        st.markdown("""
+        ```mermaid
+        graph TD
+            A[create_rfx_node] --> B[dual_extract_quotes_node]
+            B --> C[diff_and_questionnaire_node]
+            C --> D{{"INTERRUPT / BREAKPOINT\n(Human Clarification Loop)"}}
+            D --> E[reconcile_and_score_node\n(DuckDB 5-Parameter Math)]
+            E --> F[generate_po_node]
+            F --> G([END])
+        ```
+        """)
