@@ -12,10 +12,16 @@ from google.genai import types
 from groq import Groq
 from schemas import VendorQuoteExtraction
 
-# Configurable Model Strings (Supports user override + automatic Gemini family fallback)
-PRIMARY_GEMINI_MODEL = os.getenv("PRIMARY_GEMINI_MODEL", "gemini-2.5-flash")
-FALLBACK_GEMINI_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
-GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# Strictly locked to your requested Gemini models
+GEMINI_MODEL = "gemini-3.8-flash"                       # reader A + analyst (change if your dropdown differs)
+GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+
+
+def _clean_key(key: str) -> str:
+    if not key:
+        return ""
+    return key.strip().strip('"').strip("'")
 
 
 def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
@@ -29,7 +35,6 @@ def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
     df = df.dropna(how="all").reset_index(drop=True)
     records = []
     for idx, row in df.iterrows():
-        # Flexible column mapping so your existing 30-line sheet works out of the box
         row_dict = {str(k).strip().lower(): v for k, v in row.to_dict().items()}
         records.append({
             "line_id": int(row_dict.get("line_id", row_dict.get("s.no", row_dict.get("id", idx + 1)))),
@@ -52,7 +57,6 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
         doc = fitz.open(file_path)
         for page_num, page in enumerate(doc):
             extracted_text += f"\n[Page {page_num + 1}]\n" + page.get_text("text")
-            # Render page as image in case of scanned PDF or angled photo inside PDF
             pix = page.get_pixmap(dpi=150)
             images_bytes.append(pix.tobytes("png"))
         doc.close()
@@ -89,28 +93,28 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
 class DualLLMRouter:
     """Manages Gemini Primary + Fallback family routing and Groq Llama 4 parallel execution."""
     def __init__(self, gemini_api_key: str = None, groq_api_key: str = None):
-        self.gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        self.groq_key = groq_api_key or os.getenv("GROQ_API_KEY")
+        self.gemini_key = _clean_key(gemini_api_key or os.getenv("GEMINI_API_KEY", ""))
+        self.groq_key = _clean_key(groq_api_key or os.getenv("GROQ_API_KEY", ""))
         self.gemini_client = genai.Client(api_key=self.gemini_key) if self.gemini_key else None
         self.groq_client = Groq(api_key=self.groq_key) if self.groq_key else None
 
     def call_gemini_with_fallback(self, prompt: str, images_bytes: List[bytes] = None, schema=None) -> Tuple[Any, str]:
-        """Attempts primary Gemini model, automatically falling back to backup Gemini models on traffic/quota errors."""
+        """Attempts GEMINI_MODEL ('gemini-3.8-flash'), strictly falling back ONLY to GEMINI_FALLBACKS."""
         if not self.gemini_client:
-            raise ValueError("GEMINI_API_KEY is not set.")
+            raise ValueError("GEMINI_API_KEY is missing or empty. Please check the sidebar or Streamlit Secrets.")
 
-        models_to_try = [PRIMARY_GEMINI_MODEL] + FALLBACK_GEMINI_MODELS
-        last_error = None
+        primary = os.getenv("PRIMARY_GEMINI_MODEL", GEMINI_MODEL).strip()
+        models_to_try = list(dict.fromkeys([primary] + GEMINI_FALLBACKS))
+        errors_log = []
 
         contents = [prompt]
         if images_bytes:
-            for img_b in images_bytes[:2]:  # Cap at 2 images for speed/token safety
+            for img_b in images_bytes[:2]:
                 contents.append(types.Part.from_bytes(data=img_b, mime_type="image/png"))
 
         config_kwargs = {"temperature": 0.1}
         if schema:
             config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_schema"] = schema
 
         for model_name in models_to_try:
             try:
@@ -119,18 +123,26 @@ class DualLLMRouter:
                     contents=contents,
                     config=types.GenerateContentConfig(**config_kwargs)
                 )
+                text_out = response.text.strip()
                 if schema:
-                    return json.loads(response.text), model_name
-                return response.text, model_name
+                    if text_out.startswith("```"):
+                        text_out = text_out.split("```")[1]
+                        if text_out.startswith("json"):
+                            text_out = text_out[4:]
+                    return json.loads(text_out.strip()), model_name
+                return text_out, model_name
             except Exception as e:
-                last_error = e
+                err_msg = f"[{model_name}]: {type(e).__name__} - {str(e)}"
+                print("Gemini Fallback Warning:", err_msg)
+                errors_log.append(err_msg)
                 continue
-        raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+
+        raise RuntimeError("All configured Gemini models failed. Details: " + " | ".join(errors_log))
 
     def call_groq_llama4(self, prompt: str, images_bytes: List[bytes] = None, json_mode: bool = True) -> Tuple[Any, str]:
         """Calls Llama 4 Scout on Groq with vision + JSON schema enforcement."""
         if not self.groq_client:
-            raise ValueError("GROQ_API_KEY is not set.")
+            raise ValueError("GROQ_API_KEY is missing or empty.")
 
         user_content = [{"type": "text", "text": prompt}]
         if images_bytes:
@@ -145,11 +157,17 @@ class DualLLMRouter:
             "messages": [{"role": "user", "content": user_content}],
             "temperature": 0.1,
         }
-        if json_mode:
+        if json_mode and not images_bytes:
             kwargs["response_format"] = {"type": "json_object"}
 
         completion = self.groq_client.chat.completions.create(**kwargs)
-        raw_text = completion.choices[0].message.content
+        raw_text = completion.choices[0].message.content.strip()
+
         if json_mode:
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+            raw_text = raw_text.strip()
             return json.loads(raw_text), GROQ_LLAMA4_MODEL
         return raw_text, GROQ_LLAMA4_MODEL

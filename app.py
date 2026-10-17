@@ -10,13 +10,13 @@ st.title("⚡ Autonomous RFx, Dual-LLM Quote Auditor & PO Engine")
 st.caption("Dual-LLM Verification (Gemini Flash w/ Family Fallback + Groq Llama 4) • Deterministic Code Normalization • Audit Defense")
 
 # Sidebar API Keys & Config
+# Inside app.py sidebar:
 with st.sidebar:
     st.header("🔑 API & Model Configuration")
     gem_key = st.text_input("Google Gemini API Key", value=os.getenv("GEMINI_API_KEY", ""), type="password")
     groq_key = st.text_input("Groq API Key (Llama 4)", value=os.getenv("GROQ_API_KEY", ""), type="password")
-    primary_gem = st.text_input("Primary Gemini Model", value="gemini-2.5-flash")
-    st.info("Fallback Chain: `gemini-2.5-pro` → `gemini-2.5-flash-lite`\nSecondary Model: `meta-llama/llama-4-scout-17b-16e-instruct`")
-
+    primary_gem = st.text_input("Primary Gemini Model", value="gemini-3.8-flash")
+    st.info("Fallback Chain: `gemini-3.1-flash-lite` → `gemini-3.5-flash-lite`\nSecondary Model: `meta-llama/llama-4-scout-17b-16e-instruct`")
     if gem_key:
         os.environ["GEMINI_API_KEY"] = gem_key
     if groq_key:
