@@ -1,4 +1,5 @@
 import os
+import re
 import io
 import json
 import base64
@@ -10,12 +11,24 @@ from typing import Dict, Any, Tuple, List
 from google import genai
 from google.genai import types
 from groq import Groq
-from schemas import VendorQuoteExtraction
 
-# Model Configurations
-GEMINI_MODEL = "gemini-3.8-flash"
+# Strictly locked to your requested Gemini models + active Groq Llama model
+GEMINI_MODEL = "gemini-3.8-flash"                       # reader A + analyst
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
 GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
+
+INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions",
+    r"system\s+override",
+    r"disregard\s+(system|previous)\s+prompt",
+    r"you\s+are\s+now\s+an?\s+unrestricted",
+    r"forget\s+all\s+prior\s+rules",
+    r"award\s+(the\s+)?(contract|po|order)\s+to",
+    r"mark\s+this\s+vendor\s+as\s+l1",
+    r"override\s+price\s+to\s+0",
+    r"<\s*script\s*>",
+    r"drop\s+table",
+]
 
 
 def _clean_key(key: str) -> str:
@@ -24,16 +37,36 @@ def _clean_key(key: str) -> str:
     return key.strip().strip('"').strip("'")
 
 
-def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
+def scan_for_prompt_injection(text_content: str, source_stage: str = "Input") -> Tuple[bool, str]:
+    """Scans text at every pipeline stage for prompt injection or decision-manipulation attempts."""
+    if not text_content:
+        return False, "None"
+    lower_text = text_content.lower()
+    for pattern in INJECTION_PATTERNS:
+        match = re.search(pattern, lower_text)
+        if match:
+            return True, f"[{source_stage}] Blocked suspicious instruction override pattern: '{match.group(0)}'"
+    return False, "None"
+
+
+def parse_buyer_requirements(file_path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Reads buyer 30-line spreadsheet and scans every row for prompt injection."""
     ext = os.path.splitext(file_path)[-1].lower()
     if ext in [".xlsx", ".xls"]:
         df = pd.read_excel(file_path)
     else:
         df = pd.read_csv(file_path)
-    
+
     df = df.dropna(how="all").reset_index(drop=True)
     records = []
+    security_flags = []
+
     for idx, row in df.iterrows():
+        row_str = " ".join(str(v) for v in row.values)
+        inj_detected, inj_msg = scan_for_prompt_injection(row_str, source_stage=f"Buyer Requirement Row {idx+1}")
+        if inj_detected:
+            security_flags.append(inj_msg)
+
         row_dict = {str(k).strip().lower(): v for k, v in row.to_dict().items()}
         records.append({
             "line_id": int(row_dict.get("line_id", row_dict.get("s.no", row_dict.get("id", idx + 1)))),
@@ -43,7 +76,7 @@ def parse_buyer_requirements(file_path: str) -> List[Dict[str, Any]]:
             "target_uom": str(row_dict.get("target_uom", row_dict.get("uom", row_dict.get("unit", "piece")))).lower(),
             "max_lead_time_days": int(row_dict.get("max_lead_time_days", row_dict.get("lead_time", 14)))
         })
-    return records
+    return records, security_flags
 
 
 def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
@@ -130,8 +163,7 @@ class DualLLMRouter:
                     return json.loads(text_out.strip()), model_name
                 return text_out, model_name
             except Exception as e:
-                err_msg = f"[{model_name}]: {type(e).__name__} - {str(e)}"
-                errors_log.append(err_msg)
+                errors_log.append(f"[{model_name}]: {type(e).__name__} - {str(e)}")
                 continue
 
         raise RuntimeError("All configured Gemini models failed. Details: " + " | ".join(errors_log))
@@ -142,10 +174,8 @@ class DualLLMRouter:
 
         model_to_use = os.getenv("GROQ_LLAMA4_MODEL", GROQ_LLAMA4_MODEL).strip()
         user_content = [{"type": "text", "text": prompt}]
-        
-        # Note: If images are present, text-only Groq models will receive the text prompt + visual context extracted
         if images_bytes:
-            user_content[0]["text"] += "\n[Note: Vendor document included visual/image attachments processed in text payload.]"
+            user_content[0]["text"] += "\n[Visual attachment present; extract from provided OCR/text or flag low confidence if purely visual.]"
 
         kwargs = {
             "model": model_to_use,
@@ -163,6 +193,5 @@ class DualLLMRouter:
                 raw_text = raw_text.split("```")[1]
                 if raw_text.startswith("json"):
                     raw_text = raw_text[4:]
-            raw_text = raw_text.strip()
-            return json.loads(raw_text), model_to_use
+            return json.loads(raw_text.strip()), model_to_use
         return raw_text, model_to_use

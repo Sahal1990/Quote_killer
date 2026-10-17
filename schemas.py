@@ -2,38 +2,46 @@ from typing import List, Dict, Optional, TypedDict, Any
 from pydantic import BaseModel, Field
 
 class BuyerLineItem(BaseModel):
-    line_id: int = Field(description="Line item number (1 to 30)")
-    item_code: str = Field(description="SKU or Item Code")
-    description: str = Field(description="Technical specification, e.g., 5-ply corrugated box")
-    required_qty: float = Field(description="Quantity needed")
-    target_uom: str = Field(description="Requested Unit of Measure, e.g., piece, box, kg")
-    max_lead_time_days: int = Field(description="Maximum acceptable delivery lead time in days")
+    line_id: int
+    item_code: str
+    description: str
+    required_qty: float
+    target_uom: str
+    max_lead_time_days: int
 
 class ExtractedQuoteLine(BaseModel):
-    line_id: int = Field(description="Matched line item number from RFx (1 to 30)")
-    quoted_description: str = Field(description="What the vendor actually quoted")
-    spec_compliant: bool = Field(description="True if matches buyer spec, False if deviation (e.g. 3-ply instead of 5-ply)")
-    quoted_qty: float = Field(description="Quantity quoted by vendor (0 if line omitted)")
-    quoted_unit_price: float = Field(description="Raw unit price as written in quote")
-    quoted_Currency: str = Field(description="Currency code: INR, USD, EUR")
-    quoted_uom: str = Field(description="Unit of measure quoted: piece, box, per_100_pcs, kg")
-    conversion_factor_to_target_uom: float = Field(
-        description="Multiplier to convert quoted_uom to buyer target_uom. E.g., if quoted per 100 pcs and buyer wants per piece, set to 0.01. Default 1.0."
-    )
-    line_discount_pct: float = Field(description="Line-specific or footnote discount percentage (0 to 100)")
+    line_id: int
+    quoted_description: str
+    spec_compliant: bool
+    quoted_qty: float
+    quoted_unit_price: float
+    quoted_Currency: str
+    quoted_uom: str
+    conversion_factor_to_target_uom: float = 1.0
+    line_discount_pct: float = 0.0
 
 class VendorQuoteExtraction(BaseModel):
-    vendor_name: str = Field(description="Name of the quoting vendor")
-    certificate_name: str = Field(description="ISO 9001, FSC, BIS, or None")
-    certificate_expiry_date: str = Field(description="Expiry date in YYYY-MM-DD format, or 'MISSING' / 'EXPIRED'")
-    incoterms: str = Field(description="DDP, CIF, EXW, FOB, or UNKNOWN")
-    freight_included: bool = Field(description="True if freight is included in unit price, False if freight is extra")
-    freight_extra_pct_or_flat: float = Field(description="If freight is extra, estimated percentage or flat surcharge noted, else 0.0")
-    payment_terms_days: int = Field(description="Net payment days, e.g., 0 for Advance, 30 for Net 30, 60 for Net 60")
-    delivery_lead_time_days: int = Field(description="Quoted delivery time in days")
-    global_footnote_discount_pct: float = Field(description="Overall discount buried in footnotes or text (0 to 100)")
-    ambiguities_detected: List[str] = Field(description="Any missing lines, unclear UoMs, blurry text, or unstated terms")
-    line_items: List[ExtractedQuoteLine] = Field(description="List of extracted line items")
+    vendor_name: str
+    certificate_name: str
+    certificate_expiry_date: str
+    incoterms: str
+    freight_included: bool
+    freight_extra_pct_or_flat: float = 0.0
+    payment_terms_days: int = 30
+    delivery_lead_time_days: int = 14
+    global_footnote_discount_pct: float = 0.0
+    ambiguities_detected: List[str] = []
+    line_items: List[ExtractedQuoteLine] = []
+    prompt_injection_detected: bool = Field(default=False)
+    injection_details: str = Field(default="None")
+    extraction_confidence_score: float = Field(default=0.95)
+
+class ClarificationEvaluation(BaseModel):
+    is_resolved: bool = Field(description="False if vendor gave vague reply like 'same as last bid' without actual numbers or PO/quote doc reference")
+    follow_up_questions: List[str] = Field(description="If not resolved, specific follow-up questions asking for exact unit rates or prior PO/quote document")
+    updated_certificate_expiry: str = Field(description="YYYY-MM-DD if vendor provided renewed certificate date, else KEEP_EXISTING")
+    updated_freight_extra_pct: float = Field(description="Confirmed freight percentage if clarified, else -1.0")
+    resolved_line_prices: List[ExtractedQuoteLine] = Field(description="Any missing or clarified line items where vendor provided concrete unit prices")
 
 class ProcurementState(TypedDict):
     rfx_id: str
@@ -41,14 +49,19 @@ class ProcurementState(TypedDict):
     fx_rates: Dict[str, float]
     buyer_requirements: List[Dict[str, Any]]
     rfx_document: str
-    vendor_files: Dict[str, str]                  # vendor_id -> file_path
-    gemini_extractions: Dict[str, Dict[str, Any]] # vendor_id -> VendorQuoteExtraction dict
-    llama_extractions: Dict[str, Dict[str, Any]]  # vendor_id -> VendorQuoteExtraction dict
-    discrepancy_log: Dict[str, List[str]]         # vendor_id -> list of LLM-vs-LLM or spec diffs
-    clarification_questions: Dict[str, List[str]] # vendor_id -> questions to send
-    vendor_clarifications: Dict[str, str]         # vendor_id -> vendor's reply text
-    reconciled_quotes: Dict[str, Dict[str, Any]]  # vendor_id -> harmonized quote dict
-    comparison_summary: List[Dict[str, Any]]      # Vendor-level 5-parameter scorecard
-    line_level_awards: List[Dict[str, Any]]       # 30-line comparison & L1 winner per line
-    defense_audit_log: List[str]                  # Code-verified defense statements
-    final_po_document: str                        # Final Markdown PO
+    security_alerts: List[str]                        # Global prompt injection log across all steps
+    vendor_files: Dict[str, str]
+    gemini_extractions: Dict[str, Dict[str, Any]]
+    llama_extractions: Dict[str, Dict[str, Any]]
+    discrepancy_log: Dict[str, List[Dict[str, Any]]]  # Structured flags with confidence & escalation status
+    clarification_questions: Dict[str, List[str]]     # Empty list [] if vendor is 100% in sync
+    clarification_round: int                          # Tracks iterative clarification rounds
+    clarification_history: List[Dict[str, Any]]
+    vendor_clarifications: Dict[str, str]
+    reconciled_quotes: Dict[str, Dict[str, Any]]
+    comparison_summary: List[Dict[str, Any]]
+    line_level_awards: List[Dict[str, Any]]
+    defense_audit_log: List[str]
+    internal_signoff_approved: bool
+    internal_approver_name: str
+    final_po_document: str
