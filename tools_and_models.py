@@ -123,7 +123,9 @@ class DualLLMRouter:
                     contents=contents,
                     config=types.GenerateContentConfig(**config_kwargs)
                 )
-                text_out = response.text.strip()
+                text_out = getattr(response, "text", None) or ""
+                text_out = text_out.strip()
+
                 if schema:
                     if text_out.startswith("```"):
                         text_out = text_out.split("```")[1]
