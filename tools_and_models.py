@@ -12,8 +12,7 @@ from google import genai
 from google.genai import types
 from groq import Groq
 
-# Strictly locked to your requested Gemini models + active Groq Llama model
-GEMINI_MODEL = "gemini-3.8-flash"                       # reader A + analyst
+GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
 GROQ_LLAMA4_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
 
@@ -30,15 +29,12 @@ INJECTION_PATTERNS = [
     r"drop\s+table",
 ]
 
-
 def _clean_key(key: str) -> str:
     if not key:
         return ""
     return key.strip().strip('"').strip("'")
 
-
 def scan_for_prompt_injection(text_content: str, source_stage: str = "Input") -> Tuple[bool, str]:
-    """Scans text at every pipeline stage for prompt injection or decision-manipulation attempts."""
     if not text_content:
         return False, "None"
     lower_text = text_content.lower()
@@ -48,9 +44,7 @@ def scan_for_prompt_injection(text_content: str, source_stage: str = "Input") ->
             return True, f"[{source_stage}] Blocked suspicious instruction override pattern: '{match.group(0)}'"
     return False, "None"
 
-
 def parse_buyer_requirements(file_path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Reads buyer 30-line spreadsheet and scans every row for prompt injection."""
     ext = os.path.splitext(file_path)[-1].lower()
     if ext in [".xlsx", ".xls"]:
         df = pd.read_excel(file_path)
@@ -78,7 +72,6 @@ def parse_buyer_requirements(file_path: str) -> Tuple[List[Dict[str, Any]], List
         })
     return records, security_flags
 
-
 def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
     ext = os.path.splitext(file_path)[-1].lower()
     extracted_text = f"--- SOURCE FILE: {os.path.basename(file_path)} ---\n"
@@ -91,7 +84,6 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
             pix = page.get_pixmap(dpi=150)
             images_bytes.append(pix.tobytes("png"))
         doc.close()
-
     elif ext == ".docx":
         doc = Document(file_path)
         for p in doc.paragraphs:
@@ -100,12 +92,10 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
         for table in doc.tables:
             for row in table.rows:
                 extracted_text += " | ".join(cell.text.strip() for cell in row.cells) + "\n"
-
     elif ext in [".xlsx", ".xls", ".csv"]:
         df_dict = pd.read_excel(file_path, sheet_name=None) if ext != ".csv" else {"Sheet1": pd.read_csv(file_path)}
         for sheet_name, df in df_dict.items():
             extracted_text += f"\n[Sheet: {sheet_name}]\n" + df.to_markdown(index=False) + "\n"
-
     elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
         with Image.open(file_path) as img:
             img_rgb = img.convert("RGB")
@@ -113,13 +103,11 @@ def extract_multimodal_payload(file_path: str) -> Tuple[str, List[bytes]]:
             img_rgb.save(buf, format="PNG")
             images_bytes.append(buf.getvalue())
         extracted_text += "[Visual Quote Image Attached - Inspect image carefully for angled text, prices, and footnotes.]\n"
-
     else:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             extracted_text += f.read()
 
     return extracted_text, images_bytes
-
 
 class DualLLMRouter:
     def __init__(self, gemini_api_key: str = None, groq_api_key: str = None):
@@ -131,7 +119,6 @@ class DualLLMRouter:
     def call_gemini_with_fallback(self, prompt: str, images_bytes: List[bytes] = None, schema=None) -> Tuple[Any, str]:
         if not self.gemini_client:
             raise ValueError("GEMINI_API_KEY is missing or empty.")
-
         primary = os.getenv("PRIMARY_GEMINI_MODEL", GEMINI_MODEL).strip()
         models_to_try = list(dict.fromkeys([primary] + GEMINI_FALLBACKS))
         errors_log = []
@@ -148,13 +135,10 @@ class DualLLMRouter:
         for model_name in models_to_try:
             try:
                 response = self.gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**config_kwargs)
+                    model=model_name, contents=contents, config=types.GenerateContentConfig(**config_kwargs)
                 )
                 text_out = getattr(response, "text", None) or ""
                 text_out = text_out.strip()
-
                 if schema:
                     if text_out.startswith("```"):
                         text_out = text_out.split("```")[1]
@@ -163,31 +147,26 @@ class DualLLMRouter:
                     return json.loads(text_out.strip()), model_name
                 return text_out, model_name
             except Exception as e:
-                errors_log.append(f"[{model_name}]: {type(e).__name__} - {str(e)}")
+                errors_log.append(f"[{model_name}]: {str(e)}")
                 continue
-
-        raise RuntimeError("All configured Gemini models failed. Details: " + " | ".join(errors_log))
+        raise RuntimeError("All Gemini models failed: " + " | ".join(errors_log))
 
     def call_groq_llama4(self, prompt: str, images_bytes: List[bytes] = None, json_mode: bool = True) -> Tuple[Any, str]:
         if not self.groq_client:
             raise ValueError("GROQ_API_KEY is missing or empty.")
-
         model_to_use = os.getenv("GROQ_LLAMA4_MODEL", GROQ_LLAMA4_MODEL).strip()
-        user_content = [{"type": "text", "text": prompt}]
+        
+        # If images are present, append OCR/vision note for Groq text model
+        text_prompt = prompt
         if images_bytes:
-            user_content[0]["text"] += "\n[Visual attachment present; extract from provided OCR/text or flag low confidence if purely visual.]"
+            text_prompt += "\n[Note: This vendor quote was provided via an image/photo attachment. Extract carefully from OCR text or mark confidence as visual-source if ambiguous.]"
 
-        kwargs = {
-            "model": model_to_use,
-            "messages": [{"role": "user", "content": user_content}],
-            "temperature": 0.1,
-        }
+        kwargs = {"model": model_to_use, "messages": [{"role": "user", "content": text_prompt}], "temperature": 0.1}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
         completion = self.groq_client.chat.completions.create(**kwargs)
         raw_text = completion.choices[0].message.content.strip()
-
         if json_mode:
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1]
