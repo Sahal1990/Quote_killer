@@ -10,10 +10,10 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from schemas import DEFAULT_QUESTIONNAIRE
-from tools_and_models import parse_buyer_requirements, DualLLMRouter
+from schemas import DEFAULT_QUESTIONNAIRE, RfxDraft
+from tools_and_models import parse_buyer_requirements, DualLLMRouter, rfx_readiness, draft_to_requirements, simulate_dispatch
 from graph_engine import (build_procurement_graph, stream_rfx, evaluate_vendor_clarifications,
-                          AnalystAgent, set_progress_hook)
+                          AnalystAgent, set_progress_hook, copilot_step)
 
 st.set_page_config(page_title="Quote Consolidation and Award Analysis", layout="wide")
 st.title("Quote Consolidation, Audit and Award Analysis")
@@ -38,13 +38,13 @@ with st.sidebar:
     usd_rate = st.number_input("USD to INR", value=84.0)
     eur_rate = st.number_input("EUR to INR", value=91.0)
     gbp_rate = st.number_input("GBP to INR", value=108.0)
-
-    st.divider()
-    st.subheader("Quality questionnaire")
-    q_df = st.data_editor(pd.DataFrame(DEFAULT_QUESTIONNAIRE), hide_index=True, use_container_width=True, num_rows="dynamic", key="qn_editor")
-    questionnaire = q_df.dropna(subset=["id", "text"]).to_dict("records")
-
+    
 RFX_ID = "AER-2026-303"
+
+if "draft" not in st.session_state:
+    _d = RfxDraft().model_dump()
+    _d["questionnaire"] = [dict(q) for q in DEFAULT_QUESTIONNAIRE]
+    st.session_state.update(draft=_d, draft_version=0, copilot_msgs=[], security_alerts=[])
 
 if "graph" not in st.session_state:
     st.session_state.graph = build_procurement_graph()
@@ -89,31 +89,83 @@ def snapshot():
 
 
 # ----------------------------------------------------------------------------- step 1
-st.subheader("Step 1. Requirements and RFx")
-buyer_file = st.file_uploader("Buyer requirement schedule (.xlsx or .csv)", type=["xlsx", "xls", "csv"])
-if buyer_file and "buyer_reqs" not in st.session_state:
-    path = os.path.join(tempfile.mkdtemp(), buyer_file.name)
-    with open(path, "wb") as f:
-        f.write(buyer_file.getbuffer())
-    st.session_state.buyer_reqs, st.session_state.security_alerts = parse_buyer_requirements(path)
+LINE_COLS = ["item_code", "description", "required_qty", "target_uom", "max_lead_time_days"]
+st.subheader("Step 1. RFx co-pilot")
+chat_col, draft_col = st.columns([1, 1.15])
 
-if "buyer_reqs" in st.session_state:
-    with st.expander(f"Requirement schedule ({len(st.session_state.buyer_reqs)} lines)", expanded=False):
-        st.dataframe(titled(pd.DataFrame(st.session_state.buyer_reqs)), use_container_width=True, hide_index=True)
-    for a in st.session_state.security_alerts:
-        st.warning(a)
-    if st.button("Draft RFx", type="primary"):
-        if not os.getenv("GEMINI_API_KEY") and not os.getenv("GROQ_API_KEY"):
+with chat_col:
+    box = st.container(height=430)
+    with box:
+        if not st.session_state.copilot_msgs:
+            st.info("Describe what you need to buy, or paste your line items. The co-pilot builds scope, items, "
+                    "questionnaire and terms, and tells you what is still missing.")
+        for m in st.session_state.copilot_msgs:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+    user_msg = st.chat_input("Message the RFx co-pilot")
+    if user_msg:
+        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY")):
             st.error("Enter at least one API key in the sidebar.")
         else:
-            with st.container(border=True):
-                st.session_state.rfx_doc = st.write_stream(
-                    stream_rfx(st.session_state.buyer_reqs, RFX_ID, ref_date, questionnaire, DualLLMRouter()))
-            st.session_state.stage = max(st.session_state.stage, 1.5)
+            hist = list(st.session_state.copilot_msgs)
+            st.session_state.copilot_msgs.append({"role": "user", "content": user_msg})
+            with st.spinner("Updating the draft"):
+                reply, new_draft = copilot_step(st.session_state.draft, hist, user_msg, DualLLMRouter())
+            st.session_state.draft = new_draft
+            st.session_state.draft_version += 1
+            st.session_state.copilot_msgs.append({"role": "assistant", "content": reply})
+            st.rerun()
+    with st.expander("Or load an existing requirement sheet"):
+        up = st.file_uploader("Buyer requirement schedule (.xlsx or .csv)", type=["xlsx", "xls", "csv"], key="req_up")
+        if up and st.session_state.get("loaded_req") != up.name:
+            p = os.path.join(tempfile.mkdtemp(), up.name)
+            with open(p, "wb") as f:
+                f.write(up.getbuffer())
+            recs, flags = parse_buyer_requirements(p)
+            st.session_state.draft["lines"] = [{k: r[k] for k in LINE_COLS} for r in recs]
+            st.session_state.security_alerts = flags
+            st.session_state.loaded_req = up.name
+            st.session_state.draft_version += 1
+            st.session_state.copilot_msgs.append({"role": "assistant", "content":
+                f"Loaded {len(recs)} line items from {up.name}. Please confirm the commercial terms, vendors and questionnaire."})
+            st.rerun()
+
+with draft_col:
+    d, ver = st.session_state.draft, st.session_state.draft_version
+    st.markdown(f"**{d.get('title') or 'Untitled RFx'}**  |  {d.get('category') or 'Category not yet set'}")
+    if d.get("scope"):
+        st.caption(d["scope"])
+    for a in st.session_state.security_alerts:
+        st.warning(a)
+    ldf = pd.DataFrame(d["lines"], columns=LINE_COLS)
+    edited = st.data_editor(ldf, num_rows="dynamic", hide_index=True, use_container_width=True, key=f"lines_{ver}")
+    d["lines"] = edited.astype(object).where(edited.notna(), None).to_dict("records")
+    t1, t2, t3 = st.tabs(["Commercial terms", "Questionnaire", "Vendors"])
+    with t1:
+        st.json(d["terms"])
+    with t2:
+        st.dataframe(pd.DataFrame(d["questionnaire"]), use_container_width=True, hide_index=True)
+    with t3:
+        vtxt = st.text_area("Vendor names or e-mail addresses, one per line", "\n".join(d["vendors"]), key=f"vend_{ver}")
+        d["vendors"] = [v.strip() for v in vtxt.splitlines() if v.strip()]
+    ready = rfx_readiness(d)
+    if ready["ready"]:
+        st.success("The draft is complete.")
+    else:
+        st.warning("Outstanding: " + "; ".join(ready["missing"][:5]))
+    if st.button("Issue RFx", type="primary", disabled=not ready["ready"]):
+        st.session_state.buyer_reqs = draft_to_requirements(d)
+        with st.container(border=True):
+            st.session_state.rfx_doc = st.write_stream(stream_rfx(
+                st.session_state.buyer_reqs, RFX_ID, ref_date, d["questionnaire"], DualLLMRouter(), d["terms"], d["title"], d["scope"]))
+        st.session_state.outbox = simulate_dispatch(d["vendors"], st.session_state.rfx_doc, RFX_ID)
+        st.session_state.stage = max(st.session_state.stage, 1.5)
 
 if "rfx_doc" in st.session_state:
     st.download_button("Download RFx (.md)", data=st.session_state.rfx_doc, file_name="RFx.md")
-    st.divider()
+    st.caption(f"Dispatch simulated: {len(st.session_state.get('outbox', []))} e-mail file(s) written to the outbox folder.")
+questionnaire = st.session_state.draft["questionnaire"]
+st.divider()
 
 # ----------------------------------------------------------------------------- step 2
 if st.session_state.stage >= 1.5:
@@ -132,6 +184,7 @@ if st.session_state.stage >= 1.5:
                 files[os.path.splitext(vf.name)[0]] = p
             state0 = {
                 "rfx_id": RFX_ID, "reference_date": ref_date,
+                "commercial_terms": st.session_state.draft["terms"],
                 "fx_rates": {"INR": 1.0, "USD": usd_rate, "EUR": eur_rate, "GBP": gbp_rate},
                 "buyer_requirements": st.session_state.buyer_reqs, "questionnaire": questionnaire,
                 "rfx_document": st.session_state.get("rfx_doc", ""), "security_alerts": st.session_state.get("security_alerts", []),

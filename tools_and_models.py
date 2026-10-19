@@ -4,6 +4,7 @@ import io
 import json
 import hashlib
 from typing import Dict, Any, Tuple, List, Iterator, Optional
+from email.message import EmailMessage
 
 import pandas as pd
 import fitz  # PyMuPDF
@@ -15,8 +16,8 @@ from groq import Groq
 
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
-GROQ_TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
-GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+GROQ_TEXT_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
 
 STYLE_RULE = (
     "Write in formal, professional business English. Do not use emoji, emoticons, "
@@ -117,9 +118,9 @@ def parse_buyer_requirements(file_path: str) -> Tuple[List[Dict[str, Any]], List
             "line_id": int(_num(r.get("line_id", r.get("s.no", r.get("id"))), idx + 1)),
             "item_code": str(r.get("item_code", r.get("sku", r.get("code", f"ITEM-{idx + 1:02d}")))),
             "description": str(r.get("description", r.get("item", r.get("specification", list(r.values())[0])))),
-            "required_qty": _num(r.get("required_qty", r.get("qty", r.get("quantity"))), 100.0),
+            "required_qty": _num(r.get("required_qty", r.get("qty", r.get("quantity"))), 0.0),
             "target_uom": str(r.get("target_uom", r.get("uom", r.get("unit", "piece")))).lower(),
-            "max_lead_time_days": int(_num(r.get("max_lead_time_days", r.get("lead_time")), 14)),
+            "max_lead_time_days": int(_num(r.get("max_lead_time_days", r.get("lead_time")), 0)),
         })
     return records, security_flags
 
@@ -327,3 +328,54 @@ class DualLLMRouter:
                 if started:
                     raise
         raise RuntimeError(f"No language model is available: {last}")
+    # --------------------------------------------------------------------------------------
+# RFx co-pilot helpers (deterministic: the model never decides readiness)
+# --------------------------------------------------------------------------------------
+REQUIRED_TERMS = ["payment_terms_days", "freight_basis", "delivery_location", "quote_validity_days", "response_deadline"]
+
+
+def rfx_readiness(draft: Dict[str, Any]) -> Dict[str, Any]:
+    missing: List[str] = []
+    if not draft.get("title"):
+        missing.append("RFx title")
+    lines = draft.get("lines") or []
+    if not lines:
+        missing.append("at least one line item")
+    for i, l in enumerate(lines, 1):
+        gaps = [k for k in ("description", "required_qty", "target_uom", "max_lead_time_days") if l.get(k) in (None, "", 0)]
+        if gaps:
+            missing.append(f"line {i}: {', '.join(gaps)}")
+    terms = draft.get("terms") or {}
+    for k in REQUIRED_TERMS:
+        if terms.get(k) in (None, ""):
+            missing.append(f"term '{k}'")
+    if not any(q.get("mandatory") for q in (draft.get("questionnaire") or [])):
+        missing.append("at least one mandatory questionnaire item")
+    if not draft.get("vendors"):
+        missing.append("vendor list")
+    return {"ready": not missing, "missing": missing}
+
+
+def draft_to_requirements(draft: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out = []
+    for i, l in enumerate(draft.get("lines") or [], 1):
+        out.append({"line_id": i, "item_code": str(l.get("item_code") or f"ITEM-{i:02d}"),
+                    "description": str(l.get("description") or ""), "required_qty": float(l.get("required_qty") or 0),
+                    "target_uom": str(l.get("target_uom") or "piece").lower(),
+                    "max_lead_time_days": int(l.get("max_lead_time_days") or 0)})
+    return out
+
+
+def simulate_dispatch(vendors: List[str], rfx_markdown: str, rfx_id: str, outbox: str = "outbox") -> List[str]:
+    """Stubbed channel: writes one .eml per vendor. Swap this function for SMTP later; nothing else changes."""
+    os.makedirs(outbox, exist_ok=True)
+    paths = []
+    for v in vendors:
+        msg = EmailMessage()
+        msg["To"], msg["From"], msg["Subject"] = v, "procurement@buyer.example", f"Request for Quotation {rfx_id}"
+        msg.set_content(rfx_markdown)
+        p = os.path.join(outbox, f"{rfx_id}_{re.sub(r'[^A-Za-z0-9_.-]', '_', v)}.eml")
+        with open(p, "wb") as f:
+            f.write(bytes(msg))
+        paths.append(p)
+    return paths    

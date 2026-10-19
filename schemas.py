@@ -1,4 +1,4 @@
-from typing import List, Dict, TypedDict, Any
+from typing import List, Dict, TypedDict, Any, Optional
 from pydantic import BaseModel, Field
 
 # Default buyer questionnaire. Editable in the application sidebar.
@@ -67,6 +67,32 @@ class ClarificationEvaluation(BaseModel):
     resolved_line_prices: List[ExtractedQuoteLine] = []
     questionnaire_updates: List[QuestionnaireAnswer] = []
 
+class CommercialTerms(BaseModel):
+    currency: str = "INR"
+    price_basis: str = "Exclusive of GST"
+    payment_terms_days: Optional[int] = None
+    freight_basis: Optional[str] = None      # for example "Freight included, delivered to plant" or "Ex-works"
+    delivery_location: Optional[str] = None
+    quote_validity_days: Optional[int] = None
+    response_deadline: Optional[str] = None  # YYYY-MM-DD
+
+
+class RfxLine(BaseModel):
+    item_code: Optional[str] = None
+    description: Optional[str] = None
+    required_qty: Optional[float] = None
+    target_uom: Optional[str] = None
+    max_lead_time_days: Optional[int] = None
+
+
+class RfxDraft(BaseModel):
+    title: str = ""
+    category: str = ""
+    scope: str = ""
+    lines: List[RfxLine] = []
+    questionnaire: List[Dict[str, Any]] = []   # {id, mandatory, text}
+    terms: CommercialTerms = CommercialTerms()
+    vendors: List[str] = []
 
 class ProcurementState(TypedDict):
     rfx_id: str
@@ -74,6 +100,7 @@ class ProcurementState(TypedDict):
     fx_rates: Dict[str, float]
     buyer_requirements: List[Dict[str, Any]]
     questionnaire: List[Dict[str, Any]]
+    commercial_terms: Dict[str, Any]
     rfx_document: str
     security_alerts: List[str]
     vendor_files: Dict[str, str]
