@@ -16,7 +16,7 @@ from groq import Groq
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
 GROQ_TEXT_MODEL = "llama-3.3-70b-versatile"
-GROQ_VISION_MODEL = "llama-3.3-70b-versatile"
+GROQ_VISION_MODEL = "mixtral-8x7b-32768"
 STYLE_RULE = (
     "Write in formal, professional business English. Do not use emoji, emoticons, "
     "exclamation marks or decorative symbols. Be precise and concise. "
