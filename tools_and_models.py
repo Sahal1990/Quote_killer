@@ -152,25 +152,38 @@ class DualLLMRouter:
         raise RuntimeError("All Gemini models failed: " + " | ".join(errors_log))
 
     def call_groq_llama4(self, prompt: str, images_bytes: List[bytes] = None, json_mode: bool = True) -> Tuple[Any, str]:
-        if not self.groq_client:
-            raise ValueError("GROQ_API_KEY is missing or empty.")
-        model_to_use = os.getenv("GROQ_LLAMA4_MODEL", GROQ_LLAMA4_MODEL).strip()
-        
-        # If images are present, append OCR/vision note for Groq text model
-        text_prompt = prompt
-        if images_bytes:
-            text_prompt += "\n[Note: This vendor quote was provided via an image/photo attachment. Extract carefully from OCR text or mark confidence as visual-source if ambiguous.]"
+        # Force-check environment or passed key
+        active_groq_key = self.groq_key or os.getenv("GROQ_API_KEY", "").strip()
+        if not active_groq_key:
+            raise ValueError("CRITICAL: GROQ_API_KEY is missing. Please enter your Groq API Key in the sidebar.")
 
-        kwargs = {"model": model_to_use, "messages": [{"role": "user", "content": text_prompt}], "temperature": 0.1}
+        if not self.groq_client:
+            self.groq_client = Groq(api_key=active_groq_key)
+
+        model_to_use = os.getenv("GROQ_LLAMA4_MODEL", GROQ_LLAMA4_MODEL).strip() or "llama-3.3-70b-versatile"
+        
+        user_content = prompt
+        if images_bytes:
+            user_content += "\n[Visual attachment present; extract data from provided OCR text.]"
+
+        kwargs = {
+            "model": model_to_use,
+            "messages": [{"role": "user", "content": user_content}],
+            "temperature": 0.1,
+        }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-        completion = self.groq_client.chat.completions.create(**kwargs)
-        raw_text = completion.choices[0].message.content.strip()
-        if json_mode:
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-            return json.loads(raw_text.strip()), model_to_use
-        return raw_text, model_to_use
+        try:
+            completion = self.groq_client.chat.completions.create(**kwargs)
+            raw_text = completion.choices[0].message.content.strip()
+            
+            if json_mode:
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("```")[1]
+                    if raw_text.startswith("json"):
+                        raw_text = raw_text[4:]
+                return json.loads(raw_text.strip()), model_to_use
+            return raw_text, model_to_use
+        except Exception as e:
+            raise RuntimeError(f"Groq API call failed on model '{model_to_use}': {str(e)}")
