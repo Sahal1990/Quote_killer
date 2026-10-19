@@ -15,8 +15,8 @@ from groq import Groq
 
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
-GROQ_TEXT_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
-GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+GROQ_TEXT_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.1-8b-instant").strip()
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "llama-3.1-8b-instant").strip()
 
 STYLE_RULE = (
     "Write in formal, professional business English. Do not use emoji, emoticons, "
