@@ -15,8 +15,9 @@ from groq import Groq
 
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
-GROQ_TEXT_MODEL = "llama-3.3-70b-versatile"
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+GROQ_TEXT_MODEL = os.getenv("GROQ_LLAMA4_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+
 STYLE_RULE = (
     "Write in formal, professional business English. Do not use emoji, emoticons, "
     "exclamation marks or decorative symbols. Be precise and concise. "
@@ -256,33 +257,26 @@ class DualLLMRouter:
         raise RuntimeError("All Gemini models failed: " + " | ".join(errors))
 
     def call_groq_llama4(self, prompt: str, images_bytes: List[bytes] = None, json_mode: bool = True) -> Tuple[Any, str]:
-        """Second reader using Groq."""
+        """Second reader. When images are supplied, a vision-capable Llama model receives the actual image."""
         if not self.groq_client:
             raise ValueError("GROQ_API_KEY is missing or empty.")
-        
-        # Use the universally stable active text model ID on Groq
-        model = "llama-3.1-8b-instant"
-        
-        content = prompt
-        if images_bytes:
-            content += "\n[Note: Visual attachments present. Relying on primary OCR text layer for extraction.]"
-
-        kwargs = {
-            "model": model,
-            "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": STYLE_RULE}, 
-                {"role": "user", "content": content}
-            ]
-        }
+        use_vision = bool(images_bytes)
+        model = GROQ_VISION_MODEL if use_vision else GROQ_TEXT_MODEL
+        content: Any = prompt
+        if use_vision:
+            content = [{"type": "text", "text": prompt}]
+            for img in images_bytes[:3]:
+                b64 = __import__("base64").b64encode(img).decode()
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        kwargs = {"model": model, "temperature": 0.1,
+                  "messages": [{"role": "system", "content": STYLE_RULE}, {"role": "user", "content": content}]}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-
         try:
             completion = self.groq_client.chat.completions.create(**kwargs)
-        except Exception as e:
-            raise RuntimeError(f"Groq API call failed on model '{model}': {str(e)}")
-            
+        except Exception:
+            kwargs.pop("response_format", None)  # some vision models reject JSON mode
+            completion = self.groq_client.chat.completions.create(**kwargs)
         raw = completion.choices[0].message.content.strip()
         return (clean_obj(parse_json_loose(raw)) if json_mode else strip_emoji(raw)), model
 
